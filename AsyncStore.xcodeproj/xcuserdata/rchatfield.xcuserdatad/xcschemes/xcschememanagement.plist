@@ -4,10 +4,43 @@
 <dict>
 	<key>SchemeUserState</key>
 	<dict>
+		<key>AsyncArchitecture.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>1</integer>
+		</dict>
+		<key>AsyncArchitectureTests.xcscheme_^#shared#^_</key>
+		<dict>
+			<key>orderHint</key>
+			<integer>2</integer>
+		</dict>
 		<key>AsyncStore.xcscheme_^#shared#^_</key>
 		<dict>
 			<key>orderHint</key>
 			<integer>0</integer>
+		</dict>
+	</dict>
+	<key>SuppressBuildableAutocreation</key>
+	<dict>
+		<key>3F8CD7FB272B923C00730A56</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>3F8CD80B272B923E00730A56</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>3F8CD815272B923E00730A56</key>
+		<dict>
+			<key>primary</key>
+			<true/>
+		</dict>
+		<key>3F8CD83A272B9B8D00730A56</key>
+		<dict>
+			<key>primary</key>
+			<true/>
 		</dict>
 	</dict>
 </dict>
