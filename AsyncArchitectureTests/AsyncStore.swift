@@ -1,5 +1,6 @@
 import Foundation
 import Combine
+import SwiftUI
 
 struct State {
 }
@@ -21,12 +22,10 @@ enum Effect {
     case subscribeToSomething
     case cancelSubscription
 
-    func callAsFunction(/*environment: Environment*/) -> ReactionSequence {
+    func callAsFunction(/*environment: Environment*/) -> AnyAsyncSequence<Action> {
         switch self {
         case .retrieveSomething:
-            return .single {
-                .retrieveComplete
-            }
+            return .single(.retrieveComplete)
 
         case .fetchSomething:
             return .single {
@@ -39,6 +38,7 @@ enum Effect {
                     return nil
                 }
             }
+            .makeCancellable(globalID: FetchCancellationID(), autoCancel: true)
 
         case .saveSomething:
             return .none
@@ -46,13 +46,12 @@ enum Effect {
         case .subscribeToSomething:
             return Timer.publish(every: 0.1, on: .main, in: .default)
                 .autoconnect()
+                .asAnyAsyncSequence()
                 .map { _ in .subscriptionTick }
-                .asReactionSequence()
-                .makeCancellable(globalID: TimerCancellationID())
+                .makeCancellable(globalID: TimerCancellationID(), autoCancel: true)
 
         case .cancelSubscription:
             return .fireAndForget {
-//                CancellationID.cancel(globalID: TimerCancellationID())
                 TimerCancellationID().cancel()
             }
         }
@@ -92,6 +91,14 @@ final class AsyncStore {
         }
     }
 
+    private var cancellables: Set<AnyCancellable> = []
+
+    deinit {
+        for cancellable in cancellables {
+            cancellable.cancel()
+        }
+    }
+
     func send(_ action: Action, _ counter: String) {
         print(counter, "SEND", action)
         let effects = reducer(&state, action)
@@ -99,19 +106,21 @@ final class AsyncStore {
         for (i, effect) in effects.enumerated() {
             let effectCounter = counter + ".\(i + 1)"
             print(effectCounter, "", effect, "...")
-//            Task(priority: .high) {
             Task {
                 print(effectCounter, "...", effect)
                 var i = 1
-                for await reaction in effect() {
+                for try await reaction in effect() {
+                    try Task.checkCancellation()
                     let reactionCounter = effectCounter + ".\(i)"
                     i += 1
                     print(reactionCounter, " REACTION", reaction)
-                    Task {
+                    Task { @MainActor in
                         send(reaction, reactionCounter)
                     }
+                    .store(in: &cancellables)
                 }
             }
+            .store(in: &cancellables)
         }
 
 //        // Without logging... it's quite small
@@ -128,109 +137,136 @@ final class AsyncStore {
     }
 }
 
-
-// MARK: -
-
-enum ReactionSequence: AsyncSequence {
-    case none
-    case single(@Sendable () async -> Action?)
-    case stream((AsyncStream<Action>.Continuation) -> Void)
-
-    typealias Element = Action
-    typealias AsyncIterator = AsyncStream<Action>.AsyncIterator
-
-    func makeAsyncIterator() -> AsyncStream<Action>.AsyncIterator {
-        AsyncStream { continuation in
-            switch self {
-            case .none:
-                continuation.finish()
-
-            case .single(let reactionBlock):
-                Task {
-                    if let reaction = await reactionBlock() {
-                        continuation.yield(reaction)
-                    }
-                    continuation.finish()
-                }
-
-            case .stream(let reactionsBlock):
-                reactionsBlock(continuation)
-            }
-        }
-        .makeAsyncIterator()
+extension Task {
+    func store(in cancellables: inout Set<AnyCancellable>) {
+        cancellables.insert(AnyCancellable { cancel() })
     }
 }
 
 // MARK: -
 
-extension ReactionSequence {
+struct AnyAsyncSequence<Element>: AsyncSequence {
+    let _makeAsyncIterator: @Sendable () -> AsyncIterator
 
-    static func asyncSequence<Seq: AsyncSequence>(_ seq: Seq) -> Self where Seq.Element == Action {
-        .stream { continuation in
-            Task {
-                do {
-                    for try await value in seq {
-                        continuation.yield(value)
-                        try Task.checkCancellation()
-                    }
-                } catch {
-                    // can't handle error. just finish.
-                }
-                continuation.finish()
-            }
+    func makeAsyncIterator() -> AsyncIterator {
+        _makeAsyncIterator()
+    }
+
+    struct AsyncIterator: AsyncIteratorProtocol {
+        let _next: () async throws -> Element?
+        func next() async throws -> Element? {
+            try await _next()
+        }
+    }
+}
+
+extension AnyAsyncSequence {
+    init<Seq: AsyncSequence>(_ asyncSequence: Seq) where Seq.Element == Element {
+        _makeAsyncIterator = {
+            var it = asyncSequence.makeAsyncIterator()
+            return AsyncIterator(_next: {
+                try await it.next()
+            })
         }
     }
 
-    static func publisher<P: Publisher>(_ p: P) -> Self where P.Output == Action, P.Failure == Never {
-        .asyncSequence(p.values)
+    static var none: Self {
+        AnyAsyncSequence(_makeAsyncIterator: {
+            AsyncIterator(_next: { nil })
+        })
+    }
+
+    static func single(_ element: Element) -> Self {
+        .single { element }
+    }
+
+    static func single(_ element: @escaping () async -> Element?) -> Self {
+        AnyAsyncSequence(_makeAsyncIterator: {
+            var once = true
+            return AsyncIterator(_next: { () async -> Element? in
+                guard once else {
+                    return nil
+                }
+                once = false
+                return await element()
+            })
+        })
     }
 
     static func fireAndForget(_ block: @escaping () async -> Void) -> Self {
         .single {
-            Task {
-                await block()
-            }
+            await block()
             return nil
         }
     }
+}
 
-    func makeCancellable<ID: CancellationID>(globalID: ID) -> ReactionSequence {
-        .stream { continuation in
-            let task = Task {
-                for await value in self {
-                    continuation.yield(value)
-                }
-                continuation.finish()
-                Task { @MainActor in
-                    allCancellables[globalID] = nil
-                }
-            }
-            Task { @MainActor in
-                allCancellables[globalID] = AnyCancellable { task.cancel() }
-            }
+extension AsyncSequence {
+    func makeCancellable<ID: CancellationID>(
+        globalID: ID,
+        autoCancel: Bool
+    ) -> AnyAsyncSequence<Element> {
+        if autoCancel {
+            globalID.cancel()
         }
+
+        let anySequence = AnyAsyncSequence(self) // trick to make `it` a `let` (not a `var`)
+        return AnyAsyncSequence(_makeAsyncIterator: {
+            let it = anySequence.makeAsyncIterator()
+            return AnyAsyncSequence.AsyncIterator(_next: { () async throws -> Element? in
+                let handle = Task { () async throws -> Element? in
+                    do {
+                        if let element = try await it.next() {
+                            return element
+                        } else {
+                            globalID.deregister()
+                            return nil
+                        }
+                    } catch {
+                        globalID.deregister()
+                        throw error
+                    }
+                }
+                globalID.register(handle)
+                return try await handle.value
+            })
+        })
+    }
+}
+
+extension Publisher where Failure == Never {
+    func asAnyAsyncSequence() -> AnyAsyncSequence<Output> {
+        AnyAsyncSequence(values)
     }
 }
 
 // MARK: -
 
-extension Publisher where Output == Action, Failure == Never {
-    func asReactionSequence() -> ReactionSequence {
-        .publisher(self)
-    }
-}
-
-// MARK: -
-
+struct FetchCancellationID: CancellationID {}
 struct TimerCancellationID: CancellationID {}
 
-protocol CancellationID: Hashable {}
+protocol CancellationID: Hashable, Sendable {}
 extension CancellationID {
     func cancel() {
         Task { @MainActor in
             guard let task = allCancellables.removeValue(forKey: self) else { return }
             task.cancel()
             print("CANCELLED:", self)
+        }
+    }
+
+    func register<Element, Failure>(_ handle: Task<Element?, Failure>) {
+        Task { @MainActor in
+            // Register cancellable
+            allCancellables[self] = AnyCancellable {
+                handle.cancel()
+            }
+        }
+    }
+
+    func deregister() {
+        Task { @MainActor in
+            allCancellables[self] = nil
         }
     }
 }
