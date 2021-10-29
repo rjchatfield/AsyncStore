@@ -22,6 +22,7 @@ final class AsyncStoreTests: XCTestCase {
         try await Task.sleep(nanoseconds: 100_000_000)
         print("🧪   🙀")
         await store.send(.buttonTapped, "3")
+        await store.send(.dismissed, "4")
         print("🧪    😴")
         try await Task.sleep(nanoseconds: 300_000_000)
         t.cancel()

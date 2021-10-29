@@ -7,6 +7,7 @@ struct State {
 enum Action {
     case featureInitialised
     case buttonTapped
+    case dismissed
 
     case subscriptionTick
     case retrieveComplete
@@ -15,38 +16,12 @@ enum Action {
 
 enum Effect {
     case subscribeToSomething
+    case cancelSubscription
     case retrieveSomething
     case fetchSomething
     case saveSomething
 
-    func callAsFunction() async -> Action? {
-        switch self {
-        case .subscribeToSomething:
-            do {
-                print("😴 .subscribeToSomething (1.5s)")
-                try await Task.sleep(nanoseconds: 1_500_000_000)
-                print(" 😳 .subscribeToSomething (1.5s)")
-                return .subscriptionTick
-            } catch {
-                return nil
-            }
-        case .retrieveSomething:
-            return .retrieveComplete
-        case .fetchSomething:
-            do {
-                print("😴 .fetchSomething (0.3s)")
-                try await Task.sleep(nanoseconds: 300_000_000)
-                print(" 😳 .fetchSomething (0.3s)")
-                return .fetchComplete
-            } catch {
-                return nil
-            }
-        case .saveSomething:
-            return nil
-        }
-    }
-
-    func getReactions() -> ReactionSequence {
+    func callAsFunction() -> ReactionSequence {
         switch self {
         case .subscribeToSomething:
             return .publisher(
@@ -54,6 +29,12 @@ enum Effect {
                     .autoconnect()
                     .map { _ in .subscriptionTick }
             )
+            .makeCancellable(globalID: TimerCancellationID())
+        case .cancelSubscription:
+            return .fireAndForget {
+//                CancellationID.cancel(globalID: TimerCancellationID())
+                TimerCancellationID().cancel()
+            }
         case .retrieveSomething:
             return .single {
                 .retrieveComplete
@@ -75,6 +56,22 @@ enum Effect {
 
     }
 }
+
+struct TimerCancellationID: CancellationID {}
+
+protocol CancellationID: Hashable {}
+extension CancellationID {
+    func cancel() {
+        Task { @MainActor in
+            guard let task = allCancellables.removeValue(forKey: self) else { return }
+            task.cancel()
+            print("CANCELLED:", self)
+        }
+    }
+}
+
+@MainActor
+var allCancellables: [AnyHashable: AnyCancellable] = [:]
 
 enum ReactionSequence: AsyncSequence {
 
@@ -99,6 +96,32 @@ enum ReactionSequence: AsyncSequence {
 
     static func publisher<P: Publisher>(_ p: P) -> Self where P.Output == Action, P.Failure == Never {
         .asyncSequence(p.values)
+    }
+
+    static func fireAndForget(_ block: @escaping () async -> Void) -> Self {
+        .single {
+            Task {
+                await block()
+            }
+            return nil
+        }
+    }
+
+    func makeCancellable<ID: CancellationID>(globalID: ID) -> ReactionSequence {
+        .stream { continuation in
+            let task = Task {
+                for await value in self {
+                    continuation.yield(value)
+                }
+                continuation.finish()
+                Task { @MainActor in
+                    allCancellables[globalID] = nil
+                }
+            }
+            Task { @MainActor in
+                allCancellables[globalID] = AnyCancellable { task.cancel() }
+            }
+        }
     }
 
     typealias AsyncIterator = AsyncStream<Action>.AsyncIterator
@@ -152,6 +175,10 @@ final class AsyncStore {
             return [
                 .fetchSomething
             ]
+        case .dismissed:
+            return [
+                .cancelSubscription
+            ]
         case .subscriptionTick:
             return []
         case .retrieveComplete:
@@ -174,7 +201,7 @@ final class AsyncStore {
             Task {
                 print(effectCounter, "...", effect)
                 var i = 1
-                for await reaction in effect.getReactions() {
+                for await reaction in effect() {
                     let reactionCounter = effectCounter + ".\(i)"
                     i += 1
                     print(reactionCounter, " REACTION", reaction)
