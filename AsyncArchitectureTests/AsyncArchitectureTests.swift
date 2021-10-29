@@ -3,8 +3,9 @@ import XCTest
 
 final class AsyncStoreTests: XCTestCase {
 
+    @MainActor
     func testExample() async throws {
-        let store = await AsyncStore()
+        let store = AsyncStore()
         let t = Task(priority: .high) {
             var time = 0
             while !Task.isCancelled {
@@ -13,16 +14,16 @@ final class AsyncStoreTests: XCTestCase {
                 time += 5
             }
         }
-        await store.send(.featureInitialised, "1")
+        store.send(.featureInitialised, "1")
         print("🧪😴")
         try await Task.sleep(nanoseconds: 600_000_000)
         print("🧪 🙀")
-        await store.send(.buttonTapped, "2")
+        store.send(.buttonTapped, "2")
         print("🧪  😴")
         try await Task.sleep(nanoseconds: 100_000_000)
         print("🧪   🙀")
-        await store.send(.buttonTapped, "3")
-        await store.send(.dismissed, "4")
+        store.send(.buttonTapped, "3")
+        store.send(.dismissed, "4")
         print("🧪    😴")
         try await Task.sleep(nanoseconds: 300_000_000)
         t.cancel()
