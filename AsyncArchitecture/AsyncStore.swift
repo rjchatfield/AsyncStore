@@ -25,10 +25,12 @@ enum Effect {
     func callAsFunction(/*environment: Environment*/) -> AnyAsyncSequence<Action> {
         switch self {
         case .retrieveSomething:
-            return .single(.retrieveComplete)
+            return .single {
+                .retrieveComplete
+            }
 
         case .fetchSomething:
-            return .single {
+            return .makeCancellable(globalID: FetchCancellationID(), autoCancel: true) {
                 do {
                     print("😴 .fetchSomething (0.3s)")
                     try await Task.sleep(nanoseconds: 300_000_000)
@@ -38,10 +40,9 @@ enum Effect {
                     return nil
                 }
             }
-            .makeCancellable(globalID: FetchCancellationID(), autoCancel: true)
 
         case .saveSomething:
-            return .none
+            return .none // but should be .fireAndForget
 
         case .subscribeToSomething:
             return Timer.publish(every: 0.1, on: .main, in: .default)
@@ -176,6 +177,7 @@ extension AnyAsyncSequence {
         })
     }
 
+    // naming "Just"?
     static func single(_ element: Element) -> Self {
         .single { element }
     }
@@ -194,25 +196,32 @@ extension AnyAsyncSequence {
     }
 
     static func fireAndForget(_ block: @escaping () async -> Void) -> Self {
-        .single {
-            await block()
-            return nil
-        }
+        AnyAsyncSequence(_makeAsyncIterator: {
+            AsyncIterator(_next: {
+                await block()
+                return nil
+            })
+        })
     }
-}
 
-extension AsyncSequence {
+    static func makeCancellable<ID: CancellationID>(
+        globalID: ID,
+        autoCancel: Bool,
+        _ element: @escaping () async -> Element?
+    ) -> Self {
+        Self.single(element)
+            .makeCancellable(globalID: globalID, autoCancel: autoCancel)
+    }
+
     func makeCancellable<ID: CancellationID>(
         globalID: ID,
         autoCancel: Bool
-    ) -> AnyAsyncSequence<Element> {
+    ) -> Self {
         if autoCancel {
             globalID.cancel()
         }
-
-        let anySequence = AnyAsyncSequence(self) // trick to make `it` a `let` (not a `var`)
         return AnyAsyncSequence(_makeAsyncIterator: {
-            let it = anySequence.makeAsyncIterator()
+            let it = _makeAsyncIterator()
             return AnyAsyncSequence.AsyncIterator(_next: { () async throws -> Element? in
                 let handle = Task { () async throws -> Element? in
                     do {
@@ -231,6 +240,16 @@ extension AsyncSequence {
                 return try await handle.value
             })
         })
+    }
+}
+
+extension AsyncSequence {
+    func makeCancellable<ID: CancellationID>(
+        globalID: ID,
+        autoCancel: Bool
+    ) -> AnyAsyncSequence<Element> {
+        AnyAsyncSequence(self)
+            .makeCancellable(globalID: globalID, autoCancel: autoCancel)
     }
 }
 
