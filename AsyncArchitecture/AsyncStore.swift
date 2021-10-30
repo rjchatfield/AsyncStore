@@ -38,6 +38,7 @@ enum Effect {
                     print(" 😳 .fetchSomething (0.3s)")
                     return .fetchComplete
                 } catch {
+                    print(" 💩 .fetchSomething - CANCELLED DURING SLEEP")
                     return nil
                 }
             }
@@ -78,6 +79,7 @@ final class AsyncStore {
         case .buttonTapped:
             return [
                 .fetchSomething
+//                .saveSomething,
             ]
         case .dismissed:
             return [
@@ -106,43 +108,62 @@ final class AsyncStore {
     /// Performs state mutation immediately without async hop
     /// But then detaches task to handle effects and reactions using structured concurrecny = managing memory and cancellation
     func send(_ action: Action, _ counter: String) {
+        print("Start of send(_:)")
         print(counter, "SEND", action)
         let effects = self.reducer(&self.state, action)
-        Task {
+        let cancellationID = StoreTaskCancellationID()
+        let handle = Task {
             await structuredHandle(effects: effects, counter)
+            cancellationID.globalDeregister()
         }
-        .store(in: &cancellables) // cancel detached tasks on deinit
+        let cancellable = AnyCancellable {
+            handle.cancel()
+        }
+        cancellationID.globalRegister { [weak self] in
+            handle.cancel()
+            Task { @MainActor [weak self] in
+                // clean-up deinit cancellables
+                self?.cancellables.remove(cancellable)
+            }
+        }
+        print("End   of send(_:)")
     }
 
     /// Async function for performing state mutation
     /// Handles effects with structured concurrency without detached task
     private func structuredSend(_ action: Action, _ counter: String) async {
-        print(counter, "async SEND", action)
+        print("Start of structuredSend(_:)", counter, action)
         let effects = self.reducer(&self.state, action)
         await structuredHandle(effects: effects, counter)
+        print("End   of structuredSend(_:)", counter, action)
     }
 
     /// Use TaskGroup to maintain structured concurrency
     /// Synchronously loop through all `Effects` and handle each `Effect` as a task added to the group
     private func structuredHandle(effects: [Effect], _ counter: String) async {
-        print(counter, "+", effects.count)
+        print(" Start of structuredHandle(effects:)", counter, "+", effects.count)
         await withTaskGroup(of: Void.self) { [weak self] group in
+            print("  Start of structuredHandle(effects:) TaskGroup", counter, "+", effects.count)
             for (i, effect) in effects.enumerated() {
                 let effectCounter = counter + ".\(i + 1)"
-                print(effectCounter, "", effect, "...")
+                print(" ", effectCounter, "", effect, "...")
                 group.addTask { [weak self] in
                     await self?.structuredHandle(effect: effect, effectCounter)
                 }
             }
+            await group.waitForAll()
+            print("  End   of structuredHandle(effects:) TaskGroup", counter, "+", effects.count)
         }
+        print(" End   of structuredHandle(effects:)", counter, "+", effects.count)
     }
 
     /// Use `TaskGroup` to maintain structured concurrency
     /// Asynchronously loop through each ReAction one-by-one, and handle eeach ReAction as a task added to the group
     private func structuredHandle(effect: Effect, _ effectCounter: String) async {
+        print("   Start of structuredHandle(effect:)", effectCounter, effect)
         await withTaskGroup(of: Void.self) { [weak self] group in
+            print("    Start of structuredHandle(effect:) TaskGroup", effectCounter, "...", effect)
             do {
-                print(effectCounter, "...", effect)
                 var i = 1
                 for try await reaction in effect() {
                     try Task.checkCancellation()
@@ -156,7 +177,10 @@ final class AsyncStore {
             } catch {
                 print("handle(effect:) something threw?", error)
             }
+            print("    End   of structuredHandle(effect:) TaskGroup", effectCounter, "...", effect)
+//            await group.waitForAll()
         }
+        print("   End   of structuredHandle(effect:)", effectCounter, effect)
     }
 }
 
@@ -254,19 +278,11 @@ extension AnyAsyncSequence {
             let it = _makeAsyncIterator()
             return AnyAsyncSequence.AsyncIterator(_next: { () async throws -> Element? in
                 let handle = Task { () async throws -> Element? in
-                    do {
-                        if let element = try await it.next() {
-                            return element
-                        } else {
-                            globalID.deregister()
-                            return nil
-                        }
-                    } catch {
-                        globalID.deregister()
-                        throw error
-                    }
+                    defer { globalID.globalDeregister() }
+                    return try await it.next()
                 }
-                globalID.register(handle)
+                // TODO: Re-registers every iteration. Is that a problem?
+                globalID.globalRegister { handle.cancel() }
                 return try await handle.value
             })
         })
@@ -291,8 +307,39 @@ extension Publisher where Failure == Never {
 
 // MARK: -
 
-struct FetchCancellationID: CancellationID {}
-struct TimerCancellationID: CancellationID {}
+struct FetchCancellationID: CancellationID {
+    static var _counter = 0
+    static var counter: Int {
+        get {
+            let c = _counter
+            _counter += 1
+            return c
+        }
+    }
+    let i = Self.counter
+}
+struct TimerCancellationID: CancellationID {
+    static var _counter = 0
+    static var counter: Int {
+        get {
+            let c = _counter
+            _counter += 1
+            return c
+        }
+    }
+    let i = Self.counter
+}
+struct StoreTaskCancellationID: CancellationID {
+    static var _counter = 0
+    static var counter: Int {
+        get {
+            let c = _counter
+            _counter += 1
+            return c
+        }
+    }
+    let i = Self.counter
+}
 
 protocol CancellationID: Hashable, Sendable {}
 extension CancellationID {
@@ -304,18 +351,18 @@ extension CancellationID {
         }
     }
 
-    func register<Element, Failure>(_ handle: Task<Element?, Failure>) {
+    func globalRegister(cancel: @escaping @Sendable () -> Void) {
         Task { @MainActor in
             // Register cancellable
-            allCancellables[self] = AnyCancellable {
-                handle.cancel()
-            }
+            allCancellables[self] = AnyCancellable(cancel)
+            print("... REGISTERED:", self)
         }
     }
 
-    func deregister() {
+    func globalDeregister() {
         Task { @MainActor in
             allCancellables[self] = nil
+            print("... DE-REGISTERED:", self)
         }
     }
 }

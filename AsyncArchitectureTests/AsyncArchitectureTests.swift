@@ -5,7 +5,9 @@ final class AsyncStoreTests: XCTestCase {
 
     @MainActor
     func testExample() async throws {
-        let store = AsyncStore()
+        weak var _store: AsyncStore?
+        var store: AsyncStore! = AsyncStore()
+        _store = store
         let t = Task(priority: .high) {
             var time = 0
             while !Task.isCancelled {
@@ -14,6 +16,7 @@ final class AsyncStoreTests: XCTestCase {
                 time += 5
             }
         }
+        print("\n\n\n")
         store.send(.featureInitialised, "1")
         print("🧪😴")
         try await Task.sleep(nanoseconds: 600_000_000)
@@ -25,22 +28,26 @@ final class AsyncStoreTests: XCTestCase {
         store.send(.buttonTapped, "3")
         store.send(.dismissed, "4")
         print("🧪    😴")
+        store = nil
         try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertNil(store)
+        XCTAssertNil(_store, "Something is retaining `self`?")
         t.cancel()
-        XCTAssertEqual(store.state.history, [
-            .featureInitialised,
-            .subscriptionTick,
-            .subscriptionTick,
-            .subscriptionTick,
-            .fetchComplete,
-            .subscriptionTick,
-            .subscriptionTick,
-            .subscriptionTick,
-            .buttonTapped,
-            .subscriptionTick,
-            .buttonTapped,
-            .dismissed,
-        ])
+        print("\n\n\n")
+//        XCTAssertEqual(_store?.state.history, [
+//            .featureInitialised,
+//            .subscriptionTick,
+//            .subscriptionTick,
+//            .subscriptionTick,
+//            .fetchComplete,
+//            .subscriptionTick,
+//            .subscriptionTick,
+//            .subscriptionTick,
+//            .buttonTapped,
+//            .subscriptionTick,
+//            .buttonTapped,
+//            .dismissed,
+//        ])
     }
 
 }
