@@ -3,9 +3,10 @@ import Combine
 import SwiftUI
 
 struct State {
+    var history: [Action] = []
 }
 
-enum Action {
+enum Action: Equatable {
     case featureInitialised
     case buttonTapped
     case dismissed
@@ -67,6 +68,7 @@ final class AsyncStore {
 
     private(set) var state = State()
     private let reducer: (inout State, Action) -> [Effect] = { state, action in
+        state.history.append(action)
         switch action {
         case .featureInitialised:
             return [
@@ -100,14 +102,46 @@ final class AsyncStore {
         }
     }
 
+    /// Public API
+    /// Performs state mutation immediately without async hop
+    /// But then detaches task to handle effects and reactions using structured concurrecny = managing memory and cancellation
     func send(_ action: Action, _ counter: String) {
         print(counter, "SEND", action)
-        let effects = reducer(&state, action)
+        let effects = self.reducer(&self.state, action)
+        Task {
+            await structuredHandle(effects: effects, counter)
+        }
+        .store(in: &cancellables) // cancel detached tasks on deinit
+    }
+
+    /// Async function for performing state mutation
+    /// Handles effects with structured concurrency without detached task
+    private func structuredSend(_ action: Action, _ counter: String) async {
+        print(counter, "async SEND", action)
+        let effects = self.reducer(&self.state, action)
+        await structuredHandle(effects: effects, counter)
+    }
+
+    /// Use TaskGroup to maintain structured concurrency
+    /// Synchronously loop through all `Effects` and handle each `Effect` as a task added to the group
+    private func structuredHandle(effects: [Effect], _ counter: String) async {
         print(counter, "+", effects.count)
-        for (i, effect) in effects.enumerated() {
-            let effectCounter = counter + ".\(i + 1)"
-            print(effectCounter, "", effect, "...")
-            Task {
+        await withTaskGroup(of: Void.self) { [weak self] group in
+            for (i, effect) in effects.enumerated() {
+                let effectCounter = counter + ".\(i + 1)"
+                print(effectCounter, "", effect, "...")
+                group.addTask { [weak self] in
+                    await self?.structuredHandle(effect: effect, effectCounter)
+                }
+            }
+        }
+    }
+
+    /// Use `TaskGroup` to maintain structured concurrency
+    /// Asynchronously loop through each ReAction one-by-one, and handle eeach ReAction as a task added to the group
+    private func structuredHandle(effect: Effect, _ effectCounter: String) async {
+        await withTaskGroup(of: Void.self) { [weak self] group in
+            do {
                 print(effectCounter, "...", effect)
                 var i = 1
                 for try await reaction in effect() {
@@ -115,32 +149,23 @@ final class AsyncStore {
                     let reactionCounter = effectCounter + ".\(i)"
                     i += 1
                     print(reactionCounter, " REACTION", reaction)
-                    Task { @MainActor in
-                        send(reaction, reactionCounter)
+                    group.addTask { [weak self] in
+                        await self?.structuredSend(reaction, reactionCounter)
                     }
-                    .store(in: &cancellables)
                 }
+            } catch {
+                print("handle(effect:) something threw?", error)
             }
-            .store(in: &cancellables)
         }
-
-//        // Without logging... it's quite small
-//        let effects = reducer(&state, action)
-//        for effect in effects {
-//            Task {
-//                for await reaction in effect() {
-//                    Task {
-//                        send(reaction, reactionCounter)
-//                    }
-//                }
-//            }
-//        }
     }
 }
 
 extension Task {
     func store(in cancellables: inout Set<AnyCancellable>) {
-        cancellables.insert(AnyCancellable { cancel() })
+        cancellables.insert(AnyCancellable {
+            print("Task.cancel()")
+            cancel()
+        })
     }
 }
 
@@ -156,7 +181,12 @@ struct AnyAsyncSequence<Element>: AsyncSequence {
     struct AsyncIterator: AsyncIteratorProtocol {
         let _next: () async throws -> Element?
         func next() async throws -> Element? {
-            try await _next()
+            do {
+                return try await _next()
+            } catch {
+                print(".AsyncIterator something threw?", error)
+                throw error
+            }
         }
     }
 }
@@ -270,7 +300,7 @@ extension CancellationID {
         Task { @MainActor in
             guard let task = allCancellables.removeValue(forKey: self) else { return }
             task.cancel()
-            print("CANCELLED:", self)
+            print("... CANCELLED:", self)
         }
     }
 

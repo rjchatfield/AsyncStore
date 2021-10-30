@@ -27,6 +27,20 @@ final class AsyncStoreTests: XCTestCase {
         print("🧪    😴")
         try await Task.sleep(nanoseconds: 300_000_000)
         t.cancel()
+        XCTAssertEqual(store.state.history, [
+            .featureInitialised,
+            .subscriptionTick,
+            .subscriptionTick,
+            .subscriptionTick,
+            .fetchComplete,
+            .subscriptionTick,
+            .subscriptionTick,
+            .subscriptionTick,
+            .buttonTapped,
+            .subscriptionTick,
+            .buttonTapped,
+            .dismissed,
+        ])
     }
 
 }
