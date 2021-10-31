@@ -28,26 +28,31 @@ final class AsyncStoreTests: XCTestCase {
         store.send(.buttonTapped, "3")
         store.send(.dismissed, "4")
         print("🧪    😴")
-        store = nil
         try await Task.sleep(nanoseconds: 300_000_000)
+        XCTAssertEqual(_store?.state.history, [
+            .featureInitialised,
+            .subscriptionTick,
+            .subscriptionTick,
+            .subscriptionTick,
+            .fetchComplete,
+            .subscriptionTick,
+            .subscriptionTick,
+            .subscriptionTick,
+            .buttonTapped,
+            .subscriptionTick,
+            .buttonTapped,
+            .dismissed,
+            .subscriptionTick,
+            .subscriptionTick,
+            .fetchComplete,
+            .subscriptionTick
+        ])
+        store = nil
+        try await Task.sleep(nanoseconds: 100_000_000)
         XCTAssertNil(store)
         XCTAssertNil(_store, "Something is retaining `self`?")
         t.cancel()
         print("\n\n\n")
-//        XCTAssertEqual(_store?.state.history, [
-//            .featureInitialised,
-//            .subscriptionTick,
-//            .subscriptionTick,
-//            .subscriptionTick,
-//            .fetchComplete,
-//            .subscriptionTick,
-//            .subscriptionTick,
-//            .subscriptionTick,
-//            .buttonTapped,
-//            .subscriptionTick,
-//            .buttonTapped,
-//            .dismissed,
-//        ])
     }
 
 }
