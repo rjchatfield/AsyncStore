@@ -26,8 +26,8 @@ enum Effect {
     func callAsFunction(/*environment: Environment*/) -> AnyAsyncSequence<Action> {
         switch self {
         case .retrieveSomething:
-            return .single {
-                .retrieveComplete
+            return AnyAsyncSequence.single {
+                return Action.retrieveComplete
             }
 
         case .fetchSomething:
@@ -49,8 +49,8 @@ enum Effect {
         case .subscribeToSomething:
             return Timer.publish(every: 0.1, on: .main, in: .default)
                 .autoconnect()
-                .asAnyAsyncSequence()
                 .map { _ in .subscriptionTick }
+                .asAnyAsyncSequence()
                 .makeCancellable(globalID: TimerCancellationID(), autoCancel: true)
 
         case .cancelSubscription:
@@ -70,22 +70,26 @@ final class AsyncStore {
 //actor AsyncStore {
 
     var state: State { structured.state }
-    private let structured = StructuredCore()
+    private let structured: StructuredCore
     private var cancellables: Set<AnyCancellable> = []
+
+    init() {
+        structured = StructuredCore()
+    }
 
     /// Public API
     /// Performs state mutation immediately without async hop
     /// But then detaches task to handle effects and reactions using structured concurrecny = managing memory and cancellation
     func send(_ action: Action, _ counter: String) {
-        print("Start of send(_:)")
-        print(counter, "SEND", action)
+//        print("Start of send(_:)")
+//        print(counter, "SEND", action)
         let effects = structured.reducer(&structured.state, action)
         Task { @MainActor [structured] in
             await structured.structuredHandle(effects: effects, counter)
             // TODO: De-register from `cancellables`?
         }
         .store(in: &cancellables) // cancel detached task on deinit
-        print("End   of send(_:)")
+//        print("End   of send(_:)")
     }
 
     /// Private class that performs all structured async tasks, separate from public class to avoid retain cycles.
@@ -125,55 +129,55 @@ final class AsyncStore {
         /// Async function for performing state mutation
         /// Handles effects with structured concurrency without detached task
         func structuredSend(_ action: Action, _ counter: String) async {
-            print("Start of structuredSend(_:)", counter, action)
+//            print("Start of structuredSend(_:)", counter, action)
             let effects = reducer(&state, action)
             await structuredHandle(effects: effects, counter)
-            print("End   of structuredSend(_:)", counter, action)
+//            print("End   of structuredSend(_:)", counter, action)
         }
 
         /// Use TaskGroup to maintain structured concurrency
         /// Synchronously loop through all `Effects` and handle each `Effect` as a task added to the group
         func structuredHandle(effects: [Effect], _ counter: String) async {
-            print(" Start of structuredHandle(effects:)", counter, "+", effects.count)
+//            print(" Start of structuredHandle(effects:)", counter, "+", effects.count)
             await withTaskGroup(of: Void.self) { [weak self] group in
-                print("  Start of structuredHandle(effects:) TaskGroup", counter, "+", effects.count)
-                for (i, effect) in effects.enumerated() {
-                    let effectCounter = counter + ".\(i + 1)"
-                    print(" ", effectCounter, "", effect, "...")
+//                print("  Start of structuredHandle(effects:) TaskGroup", counter, "+", effects.count)
+                for (_, effect) in effects.enumerated() {
+//                    let effectCounter = counter + ".\(i + 1)"
+//                    print(" ", effectCounter, "", effect, "...")
                     group.addTask { [weak self] in
-                        await self?.structuredHandle(effect: effect, effectCounter)
+                        await self?.structuredHandle(effect: effect, "effectCounter")
                     }
                 }
                 await group.waitForAll()
-                print("  End   of structuredHandle(effects:) TaskGroup", counter, "+", effects.count)
+//                print("  End   of structuredHandle(effects:) TaskGroup", counter, "+", effects.count)
             }
-            print(" End   of structuredHandle(effects:)", counter, "+", effects.count)
+//            print(" End   of structuredHandle(effects:)", counter, "+", effects.count)
         }
 
         /// Use `TaskGroup` to maintain structured concurrency
         /// Asynchronously loop through each ReAction one-by-one, and handle eeach ReAction as a task added to the group
         func structuredHandle(effect: Effect, _ effectCounter: String) async {
-            print("   Start of structuredHandle(effect:)", effectCounter, effect)
+//            print("   Start of structuredHandle(effect:)", effectCounter, effect)
             await withTaskGroup(of: Void.self) { [weak self] group in
-                print("    Start of structuredHandle(effect:) TaskGroup", effectCounter, "...", effect)
+//                print("    Start of structuredHandle(effect:) TaskGroup", effectCounter, "...", effect)
                 do {
-                    var i = 1
+//                    var i = 1
                     for try await reaction in effect() {
                         try Task.checkCancellation()
-                        let reactionCounter = effectCounter + ".\(i)"
-                        i += 1
-                        print(reactionCounter, " REACTION", reaction)
+//                        let reactionCounter = effectCounter + ".\(i)"
+//                        i += 1
+//                        print(reactionCounter, " REACTION", reaction)
                         group.addTask { [weak self] in
-                            await self?.structuredSend(reaction, reactionCounter)
+                            await self?.structuredSend(reaction, "reactionCounter")
                         }
                     }
                 } catch {
-                    print("handle(effect:) something threw?", error)
+//                    print("handle(effect:) something threw?", error)
                 }
                 await group.waitForAll()
-                print("    End   of structuredHandle(effect:) TaskGroup", effectCounter, "...", effect)
+//                print("    End   of structuredHandle(effect:) TaskGroup", effectCounter, "...", effect)
             }
-            print("   End   of structuredHandle(effect:)", effectCounter, effect)
+//            print("   End   of structuredHandle(effect:)", effectCounter, effect)
         }
     }
 }
@@ -196,8 +200,8 @@ struct AnyAsyncSequence<Element>: AsyncSequence {
         _makeAsyncIterator()
     }
 
-    struct AsyncIterator: AsyncIteratorProtocol {
-        let _next: () async throws -> Element?
+    struct AsyncIterator: AsyncIteratorProtocol, Sendable {
+        let _next: @Sendable () async throws -> Element?
         func next() async throws -> Element? {
             do {
                 return try await _next()
@@ -209,10 +213,10 @@ struct AnyAsyncSequence<Element>: AsyncSequence {
     }
 }
 
-extension AnyAsyncSequence {
-    init<Seq: AsyncSequence>(_ asyncSequence: Seq) where Seq.Element == Element {
+extension AnyAsyncSequence where Element: Sendable {
+    init<Seq: AsyncSequence & Sendable>(_ asyncSequence: Seq) where Seq.Element == Element, Seq.AsyncIterator: Sendable {
         _makeAsyncIterator = {
-            var it = asyncSequence.makeAsyncIterator()
+            let it = RacyIterator(asyncSequence.makeAsyncIterator())
             return AsyncIterator(_next: {
                 try await it.next()
             })
@@ -230,20 +234,14 @@ extension AnyAsyncSequence {
         .single { element }
     }
 
-    static func single(_ element: @escaping () async -> Element?) -> Self {
+    static func single(_ element: @Sendable @escaping () async -> Element?) -> Self {
         AnyAsyncSequence(_makeAsyncIterator: {
-            var once = true
-            return AsyncIterator(_next: { () async -> Element? in
-                guard once else {
-                    return nil
-                }
-                once = false
-                return await element()
-            })
+            let single = RacySingle(element)
+            return AsyncIterator(_next: { await single.next() })
         })
     }
 
-    static func fireAndForget(_ block: @escaping () async -> Void) -> Self {
+    static func fireAndForget(_ block: @Sendable @escaping () async -> Void) -> Self {
         AnyAsyncSequence(_makeAsyncIterator: {
             AsyncIterator(_next: {
                 await block()
@@ -255,7 +253,7 @@ extension AnyAsyncSequence {
     static func makeCancellable<ID: CancellationID>(
         globalID: ID,
         autoCancel: Bool,
-        _ element: @escaping () async -> Element?
+        _ element: @Sendable @escaping () async -> Element?
     ) -> Self {
         Self.single(element)
             .makeCancellable(globalID: globalID, autoCancel: autoCancel)
@@ -299,7 +297,33 @@ actor InvalidationToken {
     }
 }
 
-extension AsyncSequence {
+private actor RacySingle<Element>: Sendable {
+    var element: (@Sendable () async -> Element?)?
+    init(_ element: @Sendable @escaping () async -> Element?) {
+        self.element = element
+    }
+
+    func next() async -> Element? {
+        defer { element = nil }
+        return await element?()
+    }
+}
+
+// WARNING: terrible idea, but not sure how else to achieve this??
+// Error: Cannot call mutating async function 'next()' on actor-isolated property 'iterator'
+private final class RacyIterator<Iterator: AsyncIteratorProtocol>: @unchecked Sendable {
+//private actor RacyIterator
+    private var iterator: Iterator
+    init(_ iterator: Iterator) {
+        self.iterator = iterator
+    }
+
+    func next() async throws -> Iterator.Element? {
+        try await iterator.next()
+    }
+}
+
+extension AsyncSequence where Self: Sendable, Element: Sendable, AsyncIterator: Sendable {
     func makeCancellable<ID: CancellationID>(
         globalID: ID,
         autoCancel: Bool
@@ -309,11 +333,15 @@ extension AsyncSequence {
     }
 }
 
-extension Publisher where Failure == Never {
+extension Publisher where Output: Sendable, Failure == Never {
     func asAnyAsyncSequence() -> AnyAsyncSequence<Output> {
+        // ERROR: Type 'AsyncPublisher<Self>.AsyncIterator' (aka 'AsyncPublisher<Self>.Iterator') does not conform to the 'Sendable' protocol
         AnyAsyncSequence(values)
     }
 }
+
+extension AsyncPublisher: @unchecked Sendable {}
+extension AsyncPublisher.Iterator: @unchecked Sendable {}
 
 // MARK: -
 
